@@ -1,196 +1,139 @@
-# 🏦 Bank Transaction System
+## 💸 Money Transfer Trigger — Customer-initiated Flow
 
-> **A Production-Ready Banking System** with secure money transfers, real-time validation, and comprehensive monitoring
+Purpose: describe the end-to-end flow, checks, transactional update, logging, and handling of edge cases for a user-initiated transfer.
 
-![Banking System Demo](docs/demo.gif)
+### Actors
 
-[![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python)](https://www.python.org/)
-[![Django](https://img.shields.io/badge/Django-4.2+-green?logo=django)](https://www.djangoproject.com/)
-[![SQLite](https://img.shields.io/badge/SQLite-3.0+-blue?logo=sqlite)](https://www.sqlite.org/)
-[![Celery](https://img.shields.io/badge/Celery-5.3+-orange?logo=celery)](https://docs.celeryproject.org/)
-[![Redis](https://img.shields.io/badge/Redis-6.0+-red?logo=redis)](https://redis.io/)
-[![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+Primary actors:
 
-## 📋 Table of Contents
-- [Features](#-features)
-- [System Architecture](#-system-architecture)
-- [Quick Start](#-quick-start)
-- [Detailed Setup](#-detailed-setup)
-- [API Documentation](#-api-documentation)
-- [Development](#-development)
-- [Testing](#-testing)
-- [Production Deployment](#-production-deployment)
-- [Contributing](#-contributing)
+| Actor | Role | Responsibilities | Why needed |
+|---|---:|---|---|
+| Customer (initiator) | End user initiating transfer | Provide auth token, from/to accounts, amount, optional schedule | Source of intent — drives authorization and business rules |
+| From Account (sender) | Source of funds | Hold balance, enforce available funds and daily limits | Must be validated & locked to avoid double-spend |
+| To Account (receiver) | Recipient of funds | Receive credited amount and maintain balance | Completes the transfer; used for reconciliation |
+| Auth Service / Token Validator | Authentication & authorization | Validate JWT, scopes, user status, token revocation | Ensures only authorized actions proceed |
 
-## ⭐ Features
-- **Secure Money Transfers**: account-to-account transfers
-- **Transaction Validation**: Automatic balance & limit verification
-- **Daily Limits**: Configurable transfer limits with monitoring
-- **Scheduled Transfers**: Future-dated transactions using Celery
-- **Audit Logging**: Comprehensive transaction history
-- **High Security**: Authentication, encryption, and validation
-- **API First**: Complete REST API with documentation
-- **Production Ready**: Includes monitoring, logging, and deployment configs
+Supporting/system actors:
 
-## 🏗 System Architecture
-![Architecture Diagram](docs/architecture.png)
+| Actor | Role | Responsibilities | Why needed |
+|---|---:|---|---|
+| Database (Transactional DB) | Single source of truth for balances/transactions | Persist accounts, transactions, scheduled transfers, idempotency keys | Atomic updates and durable state |
+| Redis (counter/cache) | Fast counters and short-term state | Daily counters, rate-limits, locks, TTL-backed keys | Low-latency enforcement of daily limits and transient state |
+| Celery / Task Runner | Async execution for scheduled transfers | Enqueue and execute scheduled transfers, retries, idempotency | Decouples scheduling and execution; handles late/long work |
+| AuditLog / Logging system | Forensics & compliance | Persist attempt records, outcomes, metadata (user, IP, request id) | Required for audits, dispute resolution, alerts |
+| Notification service | User notifications | Send success/failure emails/SMS/push | UX and user-facing confirmations |
+| Monitoring & Metrics (Prometheus, Sentry) | Observability | Track attempts, failures, rate-limits, latencies, errors | Alerting and incident response |
+| Anti-fraud / Risk service | Risk evaluation | Score transfers, flag suspicious activity | Prevents fraud and enforces manual review workflows |
+| Idempotency store | Deduplication | Persist idempotency keys and outcomes | Prevents double-processing on retries |
 
-```mermaid
-flowchart TD
-    A[Client] -->|API Request| B[Load Balancer]
-    B --> C[Django API Server]
-    C --> D[SQLite]
-    C --> E[Redis Cache]
-    C --> F[Celery Workers]
-    F --> D
-    F --> E
+### Why explicit actors & responsibilities matter
+- Clear ownership: maps each capability to a service/team for faster debugging and change control.  
+- Security: isolates auth, fraud, and persistence so failures in one layer don't silently corrupt state.  
+- Reliability: separates fast-path counters (Redis) from source-of-truth (DB) and provides DB fallback.  
+- Observability & compliance: ensures every attempt is recorded for audits and dispute resolution.  
+- Scalability: lets high-throughput components (counters, task queues) scale independently from transactional DB.
+
+### 1) High-level flow
+1. Authenticate request (JWT).
+2. Validate accounts exist and are active.
+3. Validate sender has sufficient balance.
+4. Validate daily limit (Redis counter with DB fallback).
+5. Perform atomic DB transaction: debit sender, credit receiver, insert Transaction and AuditLog records.
+6. Return success or specific error.
+7. (Optional) If transfer is scheduled, enqueue Celery task instead of immediate DB transfer.
+
+### 2) Example API (request / responses)
+Request:
+```
+POST /api/v1/transfer/
+Authorization: Bearer <access_token>
+{
+    "from_account": "ACC123",
+    "to_account": "ACC456",
+    "amount": 1000.00,
+    "schedule_at": null   # ISO timestamp to schedule; null for immediate
+}
 ```
 
-## 🚀 Quick Start
-
-1. **Clone & Setup**
-```bash
-# Clone repository
-git clone https://github.com/yourusername/bank-system.git
-cd bank-system
-
-# Create & activate virtual environment
-python -m venv venv
-source venv/bin/activate  # Linux/Mac
-# or
-.\venv\Scripts\activate  # Windows
+Success (200 / 201):
+```
+{
+    "transaction_id": "TXN_0001",
+    "status": "completed",
+    "balance": 4500.00
+}
 ```
 
-2. **Install Dependencies**
-```bash
-pip install -r requirements.txt
+Errors:
+- 400 Bad Request — validation errors (e.g., daily limit exceeded)
+- 402 / 400 — insufficient funds
+- 409 Conflict — concurrent update conflict (retryable)
+Example error payloads:
+```
+{ "detail": "Insufficient funds." }
+{ "detail": "Daily transaction limit exceeded. Try again tomorrow." }
 ```
 
-3. **Configure Environment**
-```bash
-cp .env.example .env
-# Edit .env with your settings
+### 3) Atomic DB operation (conceptual / Django pseudocode)
+- Use a DB transaction + row-level locks (SELECT ... FOR UPDATE / select_for_update) to avoid race conditions.
+- Example pattern:
+```python
+from django.db import transaction
+
+@transaction.atomic
+def transfer(from_acc_id, to_acc_id, amount, user, meta):
+        # lock rows
+        from_acc = Account.objects.select_for_update().get(pk=from_acc_id)
+        to_acc = Account.objects.select_for_update().get(pk=to_acc_id)
+
+        if from_acc.balance < amount:
+                raise InsufficientFunds()
+
+        # update balances
+        from_acc.balance -= amount
+        to_acc.balance += amount
+        from_acc.save()
+        to_acc.save()
+
+        # record transaction + audit
+        txn = Transaction.objects.create(..., amount=amount, status='completed')
+        AuditLog.objects.create(transaction=txn, user=user, action='transfer', outcome='success', meta=meta)
+        return txn
 ```
+- Wrap with retry/backoff on serialized errors (e.g., transaction serialization failures).
 
-4. **Database Setup**
-```bash
-# Run migrations
-python manage.py migrate
+### 4) Daily limit check (Redis atomic counter + DB fallback)
+- Use Redis INCR with TTL per account/day key:
 ```
-
-5. **Start Services**
-```bash
-# Start Redis
-sudo systemctl start redis
-
-# Start Celery Worker
-celery -A bank worker --beat --scheduler django -l info
-
-# Run Development Server
-python manage.py runserver
+KEY = f"daily:{account_id}:{YYYYMMDD}"
+count = redis.incrbyfloat(KEY, amount)
+if redis.ttl(KEY) == -1:
+        redis.expire(KEY, seconds_until_midnight)
+if count > account.daily_limit:
+        # concurrently rollback or deny
 ```
+- If Redis unavailable, compute total from DB (sum of today's transactions) and enforce limit.
 
-## 📦 Detailed Setup
+### 5) Scheduled transfers (Celery)
+- If schedule_at provided, persist a ScheduledTransfer record and enqueue a Celery task:
+    - Celery task performs the same atomic transfer routine at execution time.
+    - Use idempotency key (transaction or schedule id) to avoid double-processing.
+    - Task should re-check balance & limits and log outcome into AuditLog.
 
-### System Requirements
-- Python 3.8+
-- SQLite 3.0+
-- Redis 6.0+
+### 6) Audit & observability
+- Always write AuditLog entries for attempts (success/failure) including: user, IP, request id, input payload, reason if failed.
+- Correlate logs with request-id and trace id for debugging.
+- Metrics: transfer attempts, successes, failures, rate-limited counts.
 
-### Installation Steps
+### 7) Edge cases & handling
+- Insufficient funds: return 400/402 with clear message; log as failed audit event.
+- Exceeding daily limits: return 400 with limit details; increment a rate-limit metric.
+- Concurrent updates: detect serialization errors/locked rows, retry with bounded attempts; return 409 if persistent.
+- Partial failures: never leave balances inconsistent — if any DB write fails, rollback the whole transaction and log failure.
+- Redis inconsistency: if Redis indicates limit exceeded but DB shows otherwise, prefer DB-consistent enforcement and reconcile counters asynchronously.
 
-1. **System Dependencies (Ubuntu/Debian)**
-```bash
-# Update package list
-sudo apt update
-
-# Install system dependencies
-sudo apt install python3-pip python3-dev redis-server
-```
-
-2. **Environment Configuration**
-```bash
-# Required environment variables
-export DJANGO_SETTINGS_MODULE=bank.settings.production
-export DATABASE_URL=sqlite:///db.sqlite3
-export REDIS_URL=redis://localhost:6379/0
-export SECRET_KEY=your-secret-key
-```
-
-## 📚 API Documentation
-
-### Base URL
-`https://api.yourbank.com/v1/`
-
-### Authentication
-```bash
-# Get access token
-curl -X POST /api/token/ \
-    -H "Content-Type: application/json" \
-    -d '{"username": "user", "password": "pass"}'
-```
-
-### Example Endpoints
-
-1. **Create Transfer**
-```bash
-curl -X POST /api/v1/transfers/ \
-    -H "Authorization: Bearer {token}" \
-    -H "Content-Type: application/json" \
-    -d '{
-        "from_account": "ACC123",
-        "to_account": "ACC456",
-        "amount": 1000.00
-    }'
-```
-
-## 🛠 Development
-
-### Running Tests
-```bash
-# Run all tests
-```bash
-# Run all tests
-python -m unittest discover -s tests
-```
-```
-
-### Code Quality
-```bash
-# Format code
-black .
-
-# Lint code
-flake8
-
-# Type checking
-mypy .
-```
-
-## 🚀 Production Deployment
-
-### Docker Deployment
-```bash
-# Build image
-docker build -t bank-system .
-
-# Run container
-docker-compose up -d
-```
-
-### Manual Deployment
-See [deployment guide](docs/deployment.md) for detailed instructions.
-
-## 🤝 Contributing
-1. Fork the repository
-2. Create feature branch (`git checkout -b feature/xyz`)
-3. Commit changes (`git commit -am 'Add xyz'`)
-4. Push branch (`git push origin feature/xyz`)
-5. Create Pull Request
-
-## 🙏 Acknowledgments
-- Django Community
-- SQLite Team
-- All contributors
-
+Implementation notes:
+- Keep token TTLs short or use blacklist for revocation.
+- Use DB-backed idempotency keys for safe retries.
+- Use structured logs and metrics for alerting on spikes in failures or rate-limits.
+- Test edge cases with concurrent load tests and chaos scenarios.
