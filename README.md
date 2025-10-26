@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.8+-blue?logo=python)](https://www.python.org/)
 [![Django](https://img.shields.io/badge/Django-4.2+-green?logo=django)](https://www.djangoproject.com/)
-[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-12+-blue?logo=postgresql)](https://www.postgresql.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-3.0+-blue?logo=sqlite)](https://www.sqlite.org/)
 [![Celery](https://img.shields.io/badge/Celery-5.3+-orange?logo=celery)](https://docs.celeryproject.org/)
 [![Redis](https://img.shields.io/badge/Redis-6.0+-red?logo=redis)](https://redis.io/)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey)](LICENSE)
@@ -22,10 +22,9 @@
 - [Testing](#-testing)
 - [Production Deployment](#-production-deployment)
 - [Contributing](#-contributing)
-- [License](#-license)
 
 ## ⭐ Features
-- **Secure Money Transfers**: Real-time account-to-account transfers
+- **Secure Money Transfers**: account-to-account transfers
 - **Transaction Validation**: Automatic balance & limit verification
 - **Daily Limits**: Configurable transfer limits with monitoring
 - **Scheduled Transfers**: Future-dated transactions using Celery
@@ -41,7 +40,7 @@
 flowchart TD
     A[Client] -->|API Request| B[Load Balancer]
     B --> C[Django API Server]
-    C --> D[PostgreSQL]
+    C --> D[SQLite]
     C --> E[Redis Cache]
     C --> F[Celery Workers]
     F --> D
@@ -76,12 +75,6 @@ cp .env.example .env
 
 4. **Database Setup**
 ```bash
-# Start PostgreSQL
-sudo systemctl start postgresql
-
-# Create database
-createdb bank_system
-
 # Run migrations
 python manage.py migrate
 ```
@@ -102,9 +95,8 @@ python manage.py runserver
 
 ### System Requirements
 - Python 3.8+
-- PostgreSQL 12+
+- SQLite 3.0+
 - Redis 6.0+
-- Node.js 14+ (for frontend)
 
 ### Installation Steps
 
@@ -114,23 +106,14 @@ python manage.py runserver
 sudo apt update
 
 # Install system dependencies
-sudo apt install python3-pip python3-dev libpq-dev postgresql postgresql-contrib redis-server
+sudo apt install python3-pip python3-dev redis-server
 ```
 
-2. **PostgreSQL Setup**
-```bash
-# Create database user
-sudo -u postgres createuser --interactive
-
-# Create database
-sudo -u postgres createdb bank_system
-```
-
-3. **Environment Configuration**
+2. **Environment Configuration**
 ```bash
 # Required environment variables
 export DJANGO_SETTINGS_MODULE=bank.settings.production
-export DATABASE_URL=postgres://user:password@localhost:5432/bank_system
+export DATABASE_URL=sqlite:///db.sqlite3
 export REDIS_URL=redis://localhost:6379/0
 export SECRET_KEY=your-secret-key
 ```
@@ -167,10 +150,10 @@ curl -X POST /api/v1/transfers/ \
 ### Running Tests
 ```bash
 # Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=bank
+```bash
+# Run all tests
+python -m unittest discover -s tests
+```
 ```
 
 ### Code Quality
@@ -206,10 +189,8 @@ See [deployment guide](docs/deployment.md) for detailed instructions.
 4. Push branch (`git push origin feature/xyz`)
 5. Create Pull Request
 
-## 📄 License
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
 ## 🙏 Acknowledgments
 - Django Community
-- PostgreSQL Team
+- SQLite Team
 - All contributors
+
