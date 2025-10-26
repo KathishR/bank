@@ -1,0 +1,24 @@
+# Core framework
+Django==5.0.4
+
+# REST API support
+djangorestframework==3.15.1
+djangorestframework-simplejwt==5.3.1
+
+# Redis and Celery
+celery==5.4.0
+redis==5.0.4
+django-redis==5.4.0
+
+# Environment & configuration
+python-decouple==3.8
+
+# Database support
+psycopg2-binary==2.9.9  # (Only if using PostgreSQL; remove if SQLite)
+
+# Frontend templates
+django-bootstrap5==24.2
+
+# Optional development tools
+django-cors-headers==4.3.1
+requests==2.31.0
